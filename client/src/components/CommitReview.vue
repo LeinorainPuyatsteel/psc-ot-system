@@ -1,0 +1,230 @@
+<template>
+  <div>
+    <div class="card">
+      <div class="row">
+        <label>Year
+          <input type="number" v-model.number="year" style="width:90px" />
+        </label>
+        <label>Month
+          <select v-model.number="month">
+            <option v-for="m in 12" :key="m" :value="m">{{ monthNames[m] }}</option>
+          </select>
+        </label>
+        <label>Cutoff
+          <select v-model="cutoff">
+            <option value="first">6th - 20th</option>
+            <option value="second">21st - 5th (next month)</option>
+          </select>
+        </label>
+        <button class="btn" @click="loadCommits" :disabled="loading">
+          {{ loading ? 'Loading…' : 'Load Commits' }}
+        </button>
+      </div>
+      <p class="muted" v-if="rangeLabel">Period: {{ rangeLabel }}</p>
+      <p class="muted" v-if="error" style="color:#b00020">{{ error }}</p>
+    </div>
+
+    <div class="card" v-if="rows.length">
+      <div class="row">
+        <label>Date Filed
+          <input type="date" v-model="dateFiled" />
+        </label>
+        <label>Requested by
+          <input type="text" v-model="requestedBy" style="width:220px" />
+        </label>
+        <label>Recommending approval
+          <input type="text" v-model="recommendingApproval" style="width:220px" />
+        </label>
+        <label>Approved by
+          <input type="text" v-model="approvedBy" style="width:220px" />
+        </label>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th style="width:110px">Date</th>
+            <th>Reason(s)</th>
+            <th style="width:180px">Time</th>
+            <th style="width:80px">Hours</th>
+            <th style="width:70px">Sun/Hol</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(row, i) in rows" :key="i">
+            <td>{{ row.date }}</td>
+            <td>
+              <textarea v-model="row.reason" rows="3"></textarea>
+            </td>
+            <td>
+              <input type="text" v-model="row.time" />
+            </td>
+            <td>
+              <input type="number" step="0.5" min="0" v-model.number="row.hours" />
+            </td>
+            <td style="text-align:center">
+              <input type="checkbox" v-model="row.sunHol" />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="muted" v-if="printableRows.length">
+        {{ printableRows.length }} day(s) with hours will be printed
+        (≈ {{ Math.ceil(printableRows.length / rowsPerPage) }} page(s) at {{ rowsPerPage }} rows/form;
+        long reasons may add more). Rows with blank/0 hours are skipped.
+      </p>
+
+      <div class="row" style="margin-top:16px">
+        <label>Total Reg. O.T. hrs.
+          <input type="text" :value="totalRegOT" disabled style="width:80px" />
+        </label>
+        <label>Sun/Hol O.T. hrs.
+          <input type="text" :value="totalSunHolOT" disabled style="width:80px" />
+        </label>
+        <label>Sun/Hol Excess
+          <input type="number" step="0.5" v-model.number="sunHolExcess" style="width:80px" />
+        </label>
+      </div>
+
+      <button class="btn" @click="generate" :disabled="generating" style="margin-top:12px">
+        {{ generating ? 'Generating…' : 'Generate & Print PDF' }}
+      </button>
+      <span class="muted" v-if="lastPageCount" style="margin-left:10px">
+        Generated {{ lastPageCount }} page(s) — feed {{ lastPageCount }} blank form sheet(s) into the printer.
+      </span>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted } from 'vue';
+
+const monthNames = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+
+const year = ref(new Date().getFullYear());
+const month = ref(new Date().getMonth() + 1);
+const cutoff = ref('first');
+const rangeLabel = ref('');
+const loading = ref(false);
+const generating = ref(false);
+const error = ref('');
+
+const rows = ref([]);
+const rowsPerPage = ref(17);
+const dateFiled = ref(new Date().toISOString().slice(0, 10));
+const requestedBy = ref('');
+const recommendingApproval = ref('');
+const approvedBy = ref('');
+const sunHolExcess = ref(0);
+const lastPageCount = ref(null);
+
+// Only days where hours were actually entered get printed onto the form.
+const printableRows = computed(() => rows.value.filter(r => Number(r.hours) > 0));
+
+const totalRegOT = computed(() =>
+  printableRows.value.filter(r => !r.sunHol).reduce((sum, r) => sum + Number(r.hours), 0)
+);
+const totalSunHolOT = computed(() =>
+  printableRows.value.filter(r => r.sunHol).reduce((sum, r) => sum + Number(r.hours), 0)
+);
+
+onMounted(async () => {
+  try {
+    const [cutoffRes, repoRes, metaRes] = await Promise.all([
+      fetch('/api/cutoff/current').then(r => r.json()),
+      fetch('/api/repos').then(r => r.json()),
+      fetch('/api/form-image-meta').then(r => r.json())
+    ]);
+    year.value = cutoffRes.year;
+    month.value = cutoffRes.month;
+    cutoff.value = cutoffRes.cutoff;
+    requestedBy.value = repoRes.requestorName || '';
+    recommendingApproval.value = repoRes.recommendingName || '';
+    approvedBy.value = repoRes.approvedName || '';
+    rowsPerPage.value = metaRes.fieldPositions?.table?.rowCount || 17;
+    await loadCommits();
+  } catch (e) {
+    error.value = 'Could not reach the server — is it running? (npm run dev in /server)';
+  }
+});
+
+function fmtDate(iso) {
+  const [y, m, d] = iso.split('-');
+  return `${m}/${d}/${y}`;
+}
+
+async function loadCommits() {
+  loading.value = true;
+  error.value = '';
+  try {
+    const res = await fetch(`/api/commits?year=${year.value}&month=${month.value}&cutoff=${cutoff.value}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load commits');
+
+    rangeLabel.value = data.range.label;
+
+    // One row per calendar day in the cutoff — days with commits are
+    // pre-filled, days without are left blank for you to fill (or skip).
+    rows.value = data.dates.map(dateISO => {
+      const dayCommits = data.grouped[dateISO] || [];
+      const dow = new Date(dateISO + 'T12:00:00').getDay(); // 0 = Sunday
+      let reason = '';
+      let time = '';
+
+      if (dayCommits.length) {
+        const firstTime = dayCommits[0].time;
+        const lastTime = dayCommits[dayCommits.length - 1].time;
+        time = firstTime === lastTime ? firstTime : `${firstTime}-${lastTime}`;
+        reason = dayCommits
+          .map(c => c.message)
+          .filter(m => m.trim().toLowerCase() !== 'previous commit')
+          .join('; ');
+      }
+
+      return { date: fmtDate(dateISO), reason, time, hours: '', sunHol: dow === 0 };
+    });
+  } catch (e) {
+    error.value = e.message;
+    rows.value = [];
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function generate() {
+  generating.value = true;
+  error.value = '';
+  try {
+    const res = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rows: printableRows.value,
+        totals: {
+          totalRegOT: totalRegOT.value || '',
+          sunHolOT: totalSunHolOT.value || '',
+          sunHolExcess: sunHolExcess.value || ''
+        },
+        dateFiled: fmtDate(dateFiled.value),
+        requestedBy: requestedBy.value,
+        recommendingApproval: recommendingApproval.value,
+        approvedBy: approvedBy.value
+      })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Failed to generate PDF');
+    }
+    lastPageCount.value = res.headers.get('X-Page-Count');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank');
+  } catch (e) {
+    error.value = e.message;
+  } finally {
+    generating.value = false;
+  }
+}
+</script>

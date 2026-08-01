@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  @page { size: {{PAGE_WIDTH}}in {{PAGE_HEIGHT}}in; margin: 0; }
+  html, body { width: {{PAGE_WIDTH}}in; }
+  .page {
+    position: relative;
+    width: {{PAGE_WIDTH}}in;
+    height: {{PAGE_HEIGHT}}in;
+    font-family: 'Courier New', monospace;
+    font-size: 11pt;
+    color: #000;
+    page-break-after: always;
+  }
+  .page:last-child { page-break-after: auto; }
+  .field {
+    position: absolute;
+    white-space: nowrap;
+  }
+  .field.small { font-size: 9pt; }
+  .table-box {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+  }
+  .table-row {
+    display: flex;
+    align-items: flex-start;
+    overflow: hidden;   /* keep each row exactly its fixed height */
+    min-height: 0;      /* so flexbox can't grow a row past that height */
+  }
+  .table-cell {
+    padding-right: 4px;
+    font-size: 9pt;
+    white-space: nowrap;   /* wrapping is done in JS, one line per row slot */
+    overflow: hidden;
+  }
+</style>
+</head>
+<body>
+  {{PAGES}}
+</body>
+</html>
