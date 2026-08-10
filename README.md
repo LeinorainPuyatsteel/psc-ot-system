@@ -1,23 +1,30 @@
 # PSC Overtime Request System
 
-Fills your Puyat Steel "Overtime Request Form" from your local git commit
-history, overlaid directly onto a scan of the actual form, and exports a
-print-ready PDF.
+Fills your Puyat Steel "Overtime Request Form" from your actual biometric
+attendance and your local git commit history, overlaid directly onto a scan of
+the actual form, and exports a print-ready PDF.
 
 **Stack:** Node/Express (API + Puppeteer PDF rendering) + Vue 3/Vite (review UI).
 Reads commits with plain `git log` on your local repos — no GitHub API/token
-needed since your repo lives at `C:\xampp\htdocs\psc-enterprise-system`.
+needed since your repo lives at `C:\xampp\htdocs\psc-enterprise-system` — and
+reads attendance straight from the `psc_dtr` MySQL database.
 
 ## How it works
 
 1. You pick a cutoff period (6th–20th, or 21st–5th of next month).
-2. The server runs `git log` on every repo listed in `server/config.js`
-   for that date range, one entry per commit.
-3. The Vue UI groups commits by day (one row per day) and pre-fills the
-   "Reason(s)" column from your commit messages and "Time" from the
-   first/last commit of that day.
-4. **You manually enter "No. of Hours"** per day (per your earlier answer —
-   commit timestamps alone aren't a reliable proxy for hours worked).
+2. The server pulls two things for that date range:
+   - **Reason(s)** — `git log` on every repo listed in `server/config.js`,
+     one entry per commit, grouped by day.
+   - **Time** and **No. of Hours** — your raw punches from the `time_logs`
+     table of the `psc_dtr` database, converted to overtime by the rules in
+     [Overtime rules](#overtime-rules) below.
+3. The Vue UI shows one row per day with every column pre-filled and fully
+   editable. Under each date it prints the punches the row was derived from
+   (`in 8:01 AM · out 12:08 AM (next day)`) so the source is visible at a
+   glance.
+4. Days worked without any claimable overtime are left blank with a `no OT`
+   note. Days where the clock-out is missing entirely are flagged in orange —
+   those need hours typed in by hand.
 5. Click "Generate & Print PDF" — the server produces a **blank PDF with
    only your data**, positioned to line up with the physical form
    (`server/config.js` → `FIELD_POSITIONS`, in percentages of the page).
@@ -29,6 +36,44 @@ needed since your repo lives at `C:\xampp\htdocs\psc-enterprise-system`.
    into the printer. Totals and the "Requested by" line only print on the
    last page; "Date Filed" repeats on every page since each page is a
    separate physical sheet.
+
+## Overtime rules
+
+Overtime is only ever claimed in **whole hours**, so the clock-out is floored
+to the hour — out at 8:34 PM files as 6:00 PM – 8:00 PM (2 hrs), and out at
+6:08 PM files nothing at all.
+
+| Day | Rule |
+| --- | --- |
+| **Mon–Fri** | Regular hours run to 6:00 PM. Overtime is 6:00 PM → floored clock-out. |
+| **Sat / Sun** | The whole attendance is overtime. Time-in is rounded **up** to the hour (in at 10:59 AM starts the claim at 11:00 AM) and the unpaid 12nn–1pm lunch is deducted when the span covers it. |
+
+Sunday rows are checked as **Sun/Hol** and totalled separately; Saturday counts
+as regular OT. Public holidays aren't detected — tick the box yourself.
+
+### The past-midnight problem
+
+When you clock out after midnight the biometric device records the punch
+against the **following day**, and mislabels it `C/In`:
+
+```
+5156428   2158   07/21/2026 08:01   C/In    <- Tuesday's time-in
+5156430   2158   07/22/2026 00:08   C/In    <- Tuesday's time-OUT, filed under Wednesday
+```
+
+So a day with no second punch borrows the next day's earliest punch as its
+clock-out, but only up to **4:00 AM** (`crossoverCutoffMinutes`). Later than
+that and the clock-out was genuinely forgotten, so the row is flagged instead
+of guessed at. A borrowed punch is marked used, so Wednesday doesn't then
+mistake Tuesday's clock-out for its own time-in.
+
+The example above resolves to `6:00 PM - 12:00 AM`, 6 hrs.
+
+The `status` column is ignored entirely when pairing punches — it's unreliable
+in both directions (some days open with a `C/Out`). First punch of the day is
+the time-in, last is the time-out.
+
+All of this is tunable in `server/config.js` → `OT_RULES`.
 
 ## Setup
 
@@ -47,6 +92,38 @@ Open http://localhost:5173.
 
 > Puppeteer downloads a bundled Chromium on `npm install` — first install may
 > take a minute and needs internet access.
+
+If PDF generation fails with **"Could not find Chrome (ver. 127.0.6533.88)"**,
+that download didn't happen (usually no internet at install time). Fetch it:
+
+```bash
+cd server
+npx puppeteer browsers install chrome
+```
+
+The Chrome version is **pinned to the puppeteer version** — 22.15.0 wants
+exactly 127.0.6533.88, and it only ever looks in `~/.cache/puppeteer` for that
+build. A Chrome you have installed normally is never used, no matter how new,
+so upgrading or reinstalling desktop Chrome has no effect on this error.
+Bumping puppeteer changes which build it demands and needs a fresh download.
+
+### DTR database credentials
+
+The attendance database is configured separately from `config.js`, because
+this repo has a public remote and credentials must not be committed:
+
+```bash
+cd server
+cp dtr.config.example.js dtr.config.js   # then fill in host / user / password / empNo
+```
+
+`server/dtr.config.js` is gitignored. Every value can also come from an
+environment variable, which wins over the file: `DTR_DB_HOST`, `DTR_DB_PORT`,
+`DTR_DB_USER`, `DTR_DB_PASSWORD`, `DTR_DB_NAME`, `DTR_EMP_NO`.
+
+The DTR server sits on the office LAN, so `/api/dtr` is the call that fails
+when you're working off-site. That failure is isolated: commits still load,
+the UI shows an orange warning, and Time/Hours fall back to manual entry.
 
 ## Configuring repos
 
@@ -93,7 +170,14 @@ Re-generate a PDF after each tweak to check alignment.
 - **Sun/Hol detection** is automatic (Sunday = checked) but doesn't know
   Philippine holidays — the checkbox in the review table is editable per row.
 - **Sun/Hol Excess** has no automatic source and is a plain manual input.
-- More than 17 days of commits in one cutoff period → the PDF spans
+- Every DTR-derived value is a **starting point, not the final word** — Time
+  and Hours stay editable, and only rows with hours > 0 are printed.
+- `time_logs.date_time` is a VARCHAR (`MM/DD/YYYY HH:MM`), not a DATETIME, so
+  it can't be range-queried or sorted in SQL. `lib/dtr.js` pulls the whole
+  history for your `empNo` (a few thousand rows) and filters in JS. The table
+  also stores each punch many times over under different ids, so punches are
+  de-duplicated by timestamp.
+- More than 17 days of overtime in one cutoff period → the PDF spans
   multiple pages automatically (see "How it works" above); no data is
   dropped.
 - `REQUESTOR_NAME` in `config.js` is the default for "Requested by" — also

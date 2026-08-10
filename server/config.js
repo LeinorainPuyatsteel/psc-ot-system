@@ -17,6 +17,35 @@ const REPOS = [
   // { name: 'another-project', path: 'C:\\xampp\\htdocs\\another-project', author: '' }
 ];
 
+// ---------------------------------------------------------------------------
+// OVERTIME RULES
+// ---------------------------------------------------------------------------
+// How raw DTR punches (psc_dtr.time_logs) become overtime hours. Database
+// credentials are NOT here — they live in the gitignored `dtr.config.js`.
+//
+// Overtime is only ever claimed in whole hours, so the clock-out is floored
+// to the hour: out at 8:34 PM files as 6:00 PM - 8:00 PM (2 hrs), and out at
+// 6:08 PM files nothing at all.
+// ---------------------------------------------------------------------------
+
+const OT_RULES = {
+  // Mon-Fri regular hours end here; overtime is counted from this hour on.
+  regularEndHour: 18, // 6:00 PM
+
+  // Saturday/Sunday: the whole attendance is overtime, but the unpaid lunch
+  // break is deducted when the span covers it. Time-in is rounded UP to the
+  // hour on these days (in at 10:59 AM starts the claim at 11:00 AM).
+  lunchStartHour: 12, // 12:00 NN
+  lunchEndHour: 13,   //  1:00 PM
+
+  // A clock-out past midnight is logged by the biometric device against the
+  // FOLLOWING day (and mislabelled 'C/In'). A day with no clock-out therefore
+  // borrows the next day's earliest punch, but only up to this time — beyond
+  // it, the clock-out was genuinely forgotten and the row is flagged for you
+  // to fill in by hand instead of being guessed at.
+  crossoverCutoffMinutes: 4 * 60 // 4:00 AM
+};
+
 // Signatory names printed on the form. Requested by / Recommending approval /
 // Approved by. These are defaults — they can be overridden per-form in the UI.
 const REQUESTOR_NAME = 'Leinorain Autida';
@@ -63,17 +92,17 @@ const FIELD_POSITIONS = {
     "y": 22.4
   },
   "table": {
-    "x": 11.84,
+    "x": 10.5,
     "y": 29.42,
-    "width": 84.08,
+    "width": 80,
     "height": 60.07,
     "rowCount": 17,
-    "reasonCharsPerLine": 40,
+    "reasonCharsPerLine": 44,
     "columns": {
       "date": 15,
       "reason": 45,
-      "time": 20,
-      "hours": 20
+      "time": 21,
+      "hours": 14
     }
   },
   "totals": {
@@ -106,6 +135,7 @@ const FIELD_POSITIONS = {
 
 module.exports = {
   REPOS,
+  OT_RULES,
   REQUESTOR_NAME,
   RECOMMENDING_NAME,
   APPROVED_BY_NAME,

@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const { getCommitsGroupedByDay } = require('./lib/commits');
+const { getOTGroupedByDay } = require('./lib/dtr');
 const { getCutoffRange, getCutoffDates, currentCutoff, monthName } = require('./lib/cutoff');
 const { renderOverTimeFormPDF } = require('./lib/pdf');
 
@@ -169,6 +170,36 @@ app.get('/api/commits', async (req, res) => {
     res.json({ range, grouped, dates });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/dtr?year=2026&month=7&cutoff=first
+// Actual overtime worked in that cutoff, derived from biometric punches in the
+// psc_dtr database. Keyed by 'YYYY-MM-DD'. This fills the Time and No. of
+// Hours columns; the Reason(s) column still comes from /api/commits.
+//
+// Kept separate from /api/commits on purpose: the DTR server sits on the
+// office LAN, so this is the call that fails when you're working off-site,
+// and the client degrades to manual hours instead of showing nothing.
+// ---------------------------------------------------------------------------
+app.get('/api/dtr', async (req, res) => {
+  try {
+    const year = parseInt(req.query.year, 10);
+    const month = parseInt(req.query.month, 10);
+    const cutoff = req.query.cutoff;
+
+    if (!year || !month || !['first', 'second'].includes(cutoff)) {
+      return res.status(400).json({ error: 'year, month, and cutoff (first|second) are required' });
+    }
+
+    const range = getCutoffRange(year, month, cutoff);
+    const dtr = await getOTGroupedByDay(range.start, range.end);
+
+    res.json({ range, dtr });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: `DTR lookup failed: ${err.message}` });
   }
 });
 

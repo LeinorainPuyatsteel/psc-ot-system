@@ -16,12 +16,24 @@
             <option value="second">21st - 5th (next month)</option>
           </select>
         </label>
-        <button class="btn" @click="loadCommits" :disabled="loading">
-          {{ loading ? 'Loading…' : 'Load Commits' }}
+        <button class="btn" @click="loadPeriod" :disabled="loading">
+          {{ loading ? 'Loading…' : 'Load' }}
         </button>
       </div>
       <p class="muted" v-if="rangeLabel">Period: {{ rangeLabel }}</p>
       <p class="muted" v-if="error" style="color:#b00020">{{ error }}</p>
+
+      <p class="muted note-warn" v-if="dtrError">
+        Attendance unavailable — {{ dtrError }}<br />
+        Time and No. of Hours are left blank; fill them in by hand. The DTR
+        server sits on the office LAN, so this is expected when you're off-site.
+      </p>
+      <p class="muted" v-else-if="dtrLoaded">
+        Attendance: {{ dtrDays.length }} day(s) worked, {{ dtrTotalHours }} OT hr(s) computed.
+        <span class="note-warn" v-if="missingClockOut.length">
+          — {{ missingClockOut.length }} day(s) have no clock-out on record and need manual hours.
+        </span>
+      </p>
     </div>
 
     <div class="card" v-if="rows.length">
@@ -52,7 +64,12 @@
         </thead>
         <tbody>
           <tr v-for="(row, i) in rows" :key="i">
-            <td>{{ row.date }}</td>
+            <td>
+              {{ row.date }}
+              <div class="muted dtr-note" :class="{ 'note-warn': row.warn }" v-if="row.note">
+                {{ row.note }}
+              </div>
+            </td>
             <td>
               <textarea v-model="row.reason" rows="3"></textarea>
             </td>
@@ -120,6 +137,15 @@ const approvedBy = ref('');
 const sunHolExcess = ref(0);
 const lastPageCount = ref(null);
 
+// Attendance (DTR) is loaded separately from commits so that losing the office
+// LAN degrades to manual hours instead of breaking the whole screen.
+const dtrLoaded = ref(false);
+const dtrError = ref('');
+const dtrDays = ref([]);
+
+const dtrTotalHours = computed(() => dtrDays.value.reduce((sum, d) => sum + d.hours, 0));
+const missingClockOut = computed(() => dtrDays.value.filter(d => d.noClockOut));
+
 // Only days where hours were actually entered get printed onto the form.
 const printableRows = computed(() => rows.value.filter(r => Number(r.hours) > 0));
 
@@ -144,7 +170,7 @@ onMounted(async () => {
     recommendingApproval.value = repoRes.recommendingName || '';
     approvedBy.value = repoRes.approvedName || '';
     rowsPerPage.value = metaRes.fieldPositions?.table?.rowCount || 17;
-    await loadCommits();
+    await loadPeriod();
   } catch (e) {
     error.value = 'Could not reach the server — is it running? (npm run dev in /server)';
   }
@@ -155,35 +181,77 @@ function fmtDate(iso) {
   return `${m}/${d}/${y}`;
 }
 
-async function loadCommits() {
+// Short summary of the punches behind a row, so it's obvious where the Time
+// and Hours came from — and why they're blank when they are.
+function dtrNote(d) {
+  if (!d) return '';
+  if (d.noClockOut) return `in ${d.timeIn} · no clock-out on record`;
+
+  const parts = [`in ${d.timeIn}`, `out ${d.timeOut}${d.crossedMidnight ? ' (next day)' : ''}`];
+  if (d.lunchDeducted) parts.push('less 1h lunch');
+  if (!d.hours) parts.push('no OT');
+  return parts.join(' · ');
+}
+
+async function loadPeriod() {
   loading.value = true;
   error.value = '';
+  dtrError.value = '';
+  dtrLoaded.value = false;
+  dtrDays.value = [];
+
+  const qs = `year=${year.value}&month=${month.value}&cutoff=${cutoff.value}`;
+
   try {
-    const res = await fetch(`/api/commits?year=${year.value}&month=${month.value}&cutoff=${cutoff.value}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to load commits');
+    // Attendance failing must not take the commits down with it, so it is
+    // settled separately and its error is reported on its own.
+    const [commitRes, dtrRes] = await Promise.all([
+      fetch(`/api/commits?${qs}`).then(async r => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'Failed to load commits');
+        return data;
+      }),
+      fetch(`/api/dtr?${qs}`)
+        .then(async r => {
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.error || 'Failed to load attendance');
+          return data;
+        })
+        .catch(e => ({ error: e.message }))
+    ]);
 
-    rangeLabel.value = data.range.label;
+    rangeLabel.value = commitRes.range.label;
 
-    // One row per calendar day in the cutoff — days with commits are
-    // pre-filled, days without are left blank for you to fill (or skip).
-    rows.value = data.dates.map(dateISO => {
-      const dayCommits = data.grouped[dateISO] || [];
+    const dtr = dtrRes.error ? {} : (dtrRes.dtr || {});
+    if (dtrRes.error) {
+      dtrError.value = dtrRes.error;
+    } else {
+      dtrLoaded.value = true;
+      dtrDays.value = Object.values(dtr);
+    }
+
+    // One row per calendar day in the cutoff. Reason(s) comes from commits;
+    // Time and No. of Hours come from the DTR punches. Everything stays
+    // editable — these are a starting point, not the final word.
+    rows.value = commitRes.dates.map(dateISO => {
+      const dayCommits = commitRes.grouped[dateISO] || [];
+      const day = dtr[dateISO];
       const dow = new Date(dateISO + 'T12:00:00').getDay(); // 0 = Sunday
-      let reason = '';
-      let time = '';
 
-      if (dayCommits.length) {
-        const firstTime = dayCommits[0].time;
-        const lastTime = dayCommits[dayCommits.length - 1].time;
-        time = firstTime === lastTime ? firstTime : `${firstTime}-${lastTime}`;
-        reason = dayCommits
-          .map(c => c.message)
-          .filter(m => m.trim().toLowerCase() !== 'previous commit')
-          .join('; ');
-      }
+      const reason = dayCommits
+        .map(c => c.message)
+        .filter(m => m.trim().toLowerCase() !== 'previous commit')
+        .join('; ');
 
-      return { date: fmtDate(dateISO), reason, time, hours: '', sunHol: dow === 0 };
+      return {
+        date: fmtDate(dateISO),
+        reason,
+        time: day ? day.time : '',
+        hours: day && day.hours ? day.hours : '',
+        sunHol: day ? day.sunHol : dow === 0,
+        note: dtrNote(day),
+        warn: !!(day && day.noClockOut)
+      };
     });
   } catch (e) {
     error.value = e.message;
@@ -228,3 +296,8 @@ async function generate() {
   }
 }
 </script>
+
+<style scoped>
+  .dtr-note { font-size: 11px; line-height: 1.3; margin-top: 3px; }
+  .note-warn { color: #b45309; }
+</style>

@@ -26,9 +26,9 @@ function buildHeaderFieldsHTML(dateFiled) {
 function buildFooterFieldsHTML(totals, signatures) {
   const F = FIELD_POSITIONS;
   const fields = [
-    fieldDiv(totals.totalRegOT ?? '', F.totals.totalRegOT.x, F.totals.totalRegOT.y),
-    fieldDiv(totals.sunHolOT ?? '', F.totals.sunHolOT.x, F.totals.sunHolOT.y),
-    fieldDiv(totals.sunHolExcess ?? '', F.totals.sunHolExcess.x, F.totals.sunHolExcess.y),
+    fieldDiv(totals.totalRegOT ?? '', F.totals.totalRegOT.x, F.totals.totalRegOT.y, 'text-bold'),
+    fieldDiv(totals.sunHolOT ?? '', F.totals.sunHolOT.x, F.totals.sunHolOT.y, 'text-bold'),
+    fieldDiv(totals.sunHolExcess ?? '', F.totals.sunHolExcess.x, F.totals.sunHolExcess.y, 'text-bold'),
     fieldDiv(signatures.requestedBy || '', F.requestedBy.x, F.requestedBy.y)
   ];
   // Guarded so an older config without these positions still renders.
@@ -117,7 +117,7 @@ function buildTableHTML(pageRows) {
         <div class="table-cell" style="flex:0 0 ${T.columns.date}%">${esc(row.date)}</div>
         <div class="table-cell" style="flex:1">${esc(row.reason)}</div>
         <div class="table-cell" style="flex:0 0 ${T.columns.time}%">${esc(row.time)}</div>
-        <div class="table-cell" style="flex:0 0 ${T.columns.hours}%">${esc(row.hours)}</div>
+        <div class="table-cell text-center text-bold" style="flex:0 0 ${T.columns.hours}%">${esc(row.hours)}</div>
       </div>`).join('\n');
 
   return `<div class="table-box" style="left:${T.x}%;top:${T.y}%;width:${T.width}%;height:${T.height}%">${rowsHTML}</div>`;
