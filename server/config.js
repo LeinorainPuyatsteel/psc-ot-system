@@ -48,7 +48,7 @@ const OT_RULES = {
 
 // Signatory names printed on the form. Requested by / Recommending approval /
 // Approved by. These are defaults — they can be overridden per-form in the UI.
-const REQUESTOR_NAME = 'Leinorain Autida';
+const REQUESTOR_NAME = 'LEINORAIN AUTIDA';
 const RECOMMENDING_NAME = 'APRIL GUIAN';
 const APPROVED_BY_NAME = 'DONG ZAPATA';
 
