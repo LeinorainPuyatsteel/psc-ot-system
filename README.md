@@ -14,7 +14,10 @@ reads attendance straight from the `psc_dtr` MySQL database.
 1. You pick a cutoff period (6th–20th, or 21st–5th of next month).
 2. The server pulls two things for that date range:
    - **Reason(s)** — `git log` on every repo listed in `server/config.js`,
-     one entry per commit, grouped by day.
+     one entry per commit, grouped by day. All branches are scanned (local and
+     remote-tracking), not just the one currently checked out, so the form
+     doesn't miss work depending on where you left the repo. Stashes are not
+     scanned.
    - **Time** and **No. of Hours** — your raw punches from the `time_logs`
      table of the `psc_dtr` database, converted to overtime by the rules in
      [Overtime rules](#overtime-rules) below.
@@ -40,16 +43,43 @@ reads attendance straight from the `psc_dtr` MySQL database.
 ## Overtime rules
 
 Overtime is only ever claimed in **whole hours**, so the clock-out is floored
-to the hour — out at 8:34 PM files as 6:00 PM – 8:00 PM (2 hrs), and out at
-6:08 PM files nothing at all.
+to the hour — on a day whose regular hours end at 6:00 PM, out at 8:34 PM files
+as 6:00 PM – 8:00 PM (2 hrs), and out at 6:08 PM files nothing at all.
 
-| Day | Rule |
-| --- | --- |
-| **Mon–Fri** | Regular hours run to 6:00 PM. Overtime is 6:00 PM → floored clock-out. |
-| **Sat / Sun** | The whole attendance is overtime. Time-in is rounded **up** to the hour (in at 10:59 AM starts the claim at 11:00 AM) and the unpaid 12nn–1pm lunch is deducted when the span covers it. |
+Each day of the week is either a **working day**, where overtime runs from the
+hour regular hours end to the floored clock-out, or a **rest day**, where the
+whole attendance is overtime — time-in rounded **up** to the hour (in at
+10:59 AM starts the claim at 11:00 AM) and the unpaid 12nn–1pm lunch deducted
+when the span covers it.
+
+Which is which depends on the schedule you work.
+
+### Schedules
+
+Pick yours from the **Schedule** box on the Review & Print tab. The two
+built-in ones:
+
+| | `five-day` | `five-half-day` |
+| --- | --- | --- |
+| **Mon–Thu** | regular to 6:00 PM | regular to 5:00 PM |
+| **Fri** | regular to 5:00 PM | regular to 5:00 PM |
+| **Sat** | rest day — all OT | half day: regular to 12 NN, lunch 12nn–1pm, **OT from 1:00 PM** |
+| **Sun** | rest day — all OT | rest day — all OT |
+
+The same Saturday punches therefore file very differently: in at 8:00 AM, out
+at 3:10 PM is `8:00 AM – 3:00 PM`, 6 hrs (7 less lunch) on `five-day`, but
+`1:00 PM – 3:00 PM`, 2 hrs on `five-half-day`. Saturday's lunch needs no
+deduction on `five-half-day` — starting the claim at 1:00 PM already puts it
+outside.
+
+Schedules live in `server/config.js` → `SCHEDULES`, and `DEFAULT_SCHEDULE`
+decides which one the box starts on. Add another by listing an end hour for
+each day of the week (`null` = rest day). Changing the box affects the current
+session only; it is never written back.
 
 Sunday rows are checked as **Sun/Hol** and totalled separately; Saturday counts
-as regular OT. Public holidays aren't detected — tick the box yourself.
+as regular OT on either schedule. Public holidays aren't detected — tick the
+box yourself.
 
 ### The past-midnight problem
 
@@ -67,13 +97,16 @@ that and the clock-out was genuinely forgotten, so the row is flagged instead
 of guessed at. A borrowed punch is marked used, so Wednesday doesn't then
 mistake Tuesday's clock-out for its own time-in.
 
-The example above resolves to `6:00 PM - 12:00 AM`, 6 hrs.
+The example above is a Tuesday, so on `five-day` it resolves to
+`6:00 PM - 12:00 AM`, 6 hrs.
 
 The `status` column is ignored entirely when pairing punches — it's unreliable
 in both directions (some days open with a `C/Out`). First punch of the day is
 the time-in, last is the time-out.
 
-All of this is tunable in `server/config.js` → `OT_RULES`.
+All of this is tunable in `server/config.js` — `SCHEDULES` for the per-day
+hours, `OT_RULES` for the parts that don't vary by schedule (lunch window,
+past-midnight cutoff).
 
 ## Setup
 
@@ -119,11 +152,55 @@ cp dtr.config.example.js dtr.config.js   # then fill in host / user / password /
 
 `server/dtr.config.js` is gitignored. Every value can also come from an
 environment variable, which wins over the file: `DTR_DB_HOST`, `DTR_DB_PORT`,
-`DTR_DB_USER`, `DTR_DB_PASSWORD`, `DTR_DB_NAME`, `DTR_EMP_NO`.
+`DTR_DB_USER`, `DTR_DB_PASSWORD`, `DTR_DB_NAME`, `DTR_EMP_NO`, `ADMIN_PIN`.
 
 The DTR server sits on the office LAN, so `/api/dtr` is the call that fails
 when you're working off-site. That failure is isolated: commits still load,
 the UI shows an orange warning, and Time/Hours fall back to manual entry.
+
+### ID number (whose attendance to read)
+
+`empNo` is the employee number matched against `time_logs.emp_no`. It is
+prefilled into the **ID number** box on the Review & Print tab, and changing it
+there loads a different employee's attendance for that session only — nothing
+is written back to `dtr.config.js`, so reloading the page returns to your own.
+Resolution order, most specific first:
+
+1. the ID number box in the UI (`empNo` query param on `/api/dtr`)
+2. the `DTR_EMP_NO` environment variable
+3. `empNo` in `server/dtr.config.js`
+
+Pointing the box at anybody but yourself also rewrites the parts of the form
+that describe *you*, because they'd otherwise be silently wrong:
+
+| Field | For another employee |
+| --- | --- |
+| **Requested by** | their `emp_full_name` from `psc_dtr.mast_employees` |
+| **Recommending approval** / **Approved by** | blank — that table has no supervisor on record for anyone |
+| **Reason(s)** | blank — it's built from commits in *your* repos, and nobody else here is a programmer |
+
+Those three are yours to write in by hand, and the UI says so in orange while
+the box differs from your default. They're only reset when the ID number
+actually changes, so a name you correct by hand survives reloading a different
+cutoff or schedule.
+
+`emp_no` is not unique in `mast_employees` — the primary key is `(id, emp_no)`
+and a rehire is filed as a new row — so the lookup prefers a row that isn't
+`Resigned` and takes the highest `id` after that, which is the most recent
+record.
+
+### PIN
+
+The **Repos**, **Layout** and **Calibrate** tabs rewrite `server/config.js`,
+and a stray click in either of the last two shifts where text lands on the
+pre-printed form. Set `adminPin` in `server/dtr.config.js` and they prompt for
+it; one unlock covers all three until the page is reloaded. Leave it blank and
+they stay open.
+
+The PIN is checked by `POST /api/verify-pin` rather than in the browser, so it
+never ships inside the JS bundle. It is a speed bump on the UI, **not access
+control** — `POST /api/repos` and `PUT /api/field-positions` are still open to
+anything that can reach the port.
 
 ## Configuring repos
 

@@ -4,7 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const { getCommitsGroupedByDay } = require('./lib/commits');
-const { getOTGroupedByDay } = require('./lib/dtr');
+const {
+  getOTGroupedByDay, getEmployeeName, resolveEmpNo, normalizeEmpNo, isKnownSchedule
+} = require('./lib/dtr');
 const { getCutoffRange, getCutoffDates, currentCutoff, monthName } = require('./lib/cutoff');
 const { renderOverTimeFormPDF } = require('./lib/pdf');
 
@@ -18,11 +20,34 @@ const CONFIG_PATH = path.join(__dirname, 'config.js');
 // GET /api/repos - list configured repos
 // ---------------------------------------------------------------------------
 app.get('/api/repos', (req, res) => {
+  // The default employee number is the one prefilled into the UI's ID number
+  // box. It comes from the gitignored dtr.config.js — only the number is ever
+  // exposed here, never the credentials sitting beside it. A broken or missing
+  // DTR setup must not take this endpoint down with it, since the whole review
+  // screen loads from it.
+  let defaultEmpNo = null;
+  try {
+    defaultEmpNo = resolveEmpNo();
+  } catch (err) {
+    console.error('Could not read the default employee number:', err.message);
+  }
+
+  // The schedule list populates the UI's Schedule box. Sent from here rather
+  // than from its own endpoint because this is already the call the review
+  // screen bootstraps from, and the list only changes when config.js does.
+  const schedules = Object.entries(config.SCHEDULES).map(([id, s]) => ({
+    id,
+    label: s.label
+  }));
+
   res.json({
     repos: config.REPOS,
     requestorName: config.REQUESTOR_NAME,
     recommendingName: config.RECOMMENDING_NAME,
-    approvedName: config.APPROVED_BY_NAME
+    approvedName: config.APPROVED_BY_NAME,
+    defaultEmpNo,
+    schedules,
+    defaultSchedule: config.DEFAULT_SCHEDULE
   });
 });
 
@@ -174,10 +199,19 @@ app.get('/api/commits', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/dtr?year=2026&month=7&cutoff=first
+// GET /api/dtr?year=2026&month=7&cutoff=first[&empNo=2158][&schedule=five-day]
 // Actual overtime worked in that cutoff, derived from biometric punches in the
 // psc_dtr database. Keyed by 'YYYY-MM-DD'. This fills the Time and No. of
 // Hours columns; the Reason(s) column still comes from /api/commits.
+//
+// `empNo` is optional and reads a different employee than the one configured
+// in dtr.config.js, for this request only — nothing is written back. The
+// resolved number is echoed in the response so the UI can show whose
+// attendance it is actually displaying.
+//
+// `schedule` is optional and picks which working week the punches are measured
+// against (a key of config.SCHEDULES); it defaults to DEFAULT_SCHEDULE and,
+// like empNo, is never written back.
 //
 // Kept separate from /api/commits on purpose: the DTR server sits on the
 // office LAN, so this is the call that fails when you're working off-site,
@@ -193,15 +227,92 @@ app.get('/api/dtr', async (req, res) => {
       return res.status(400).json({ error: 'year, month, and cutoff (first|second) are required' });
     }
 
-    const range = getCutoffRange(year, month, cutoff);
-    const dtr = await getOTGroupedByDay(range.start, range.end);
+    // Rejected rather than ignored: silently falling back to the default here
+    // would show one person's hours under another person's ID.
+    const rawEmpNo = req.query.empNo;
+    const supplied = rawEmpNo !== undefined && String(rawEmpNo).trim() !== '';
+    if (supplied && normalizeEmpNo(rawEmpNo) === null) {
+      return res.status(400).json({ error: 'empNo must be a positive whole number' });
+    }
 
-    res.json({ range, dtr });
+    // Same reasoning as empNo: an unrecognised schedule is rejected rather
+    // than quietly falling back, since the fallback would file real hours
+    // against the wrong working week without saying so.
+    const rawSchedule = req.query.schedule;
+    const scheduleSupplied = rawSchedule !== undefined && String(rawSchedule).trim() !== '';
+    if (scheduleSupplied && !isKnownSchedule(rawSchedule)) {
+      return res.status(400).json({
+        error: `Unknown schedule '${rawSchedule}'. Known schedules: ${Object.keys(config.SCHEDULES).join(', ')}.`
+      });
+    }
+
+    const empNo = resolveEmpNo(supplied ? rawEmpNo : undefined);
+    const range = getCutoffRange(year, month, cutoff);
+
+    // The name is a nicety — it fills in "Requested by" when you're filing for
+    // somebody else. Not being able to look it up must not cost you the hours,
+    // so it degrades to null and the field is left for you to type.
+    const [dtr, empName] = await Promise.all([
+      getOTGroupedByDay(range.start, range.end, empNo, scheduleSupplied ? rawSchedule : undefined),
+      getEmployeeName(empNo).catch(err => {
+        console.error(`Could not read the name for emp_no ${empNo}:`, err.message);
+        return null;
+      })
+    ]);
+
+    res.json({
+      range,
+      dtr,
+      empNo,
+      empName,
+      schedule: scheduleSupplied ? rawSchedule : config.DEFAULT_SCHEDULE
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: `DTR lookup failed: ${err.message}` });
   }
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/verify-pin - body: { pin } -> { ok }
+//
+// Gates the Repos / Layout / Calibrate tabs in the UI. The PIN is checked here
+// rather than in the client so it never ships inside the JS bundle, where
+// anyone with devtools could read it straight out of the source.
+//
+// What this is NOT: access control. The endpoints those tabs drive
+// (POST /api/repos, PUT /api/field-positions) are still open, so this stops a
+// misclick and a passer-by, not somebody determined. Gate the endpoints too if
+// that ever matters.
+//
+// An unset adminPin means the tabs are open — a fresh clone with no
+// dtr.config.js shouldn't be locked out of its own layout tools.
+// ---------------------------------------------------------------------------
+app.post('/api/verify-pin', (req, res) => {
+  const expected = adminPin();
+  if (!expected) return res.json({ ok: true, unset: true });
+
+  const supplied = String((req.body && req.body.pin) || '');
+  res.json({ ok: supplied === expected });
+});
+
+// GET /api/pin-required - whether the UI should bother prompting at all
+app.get('/api/pin-required', (req, res) => {
+  res.json({ required: !!adminPin() });
+});
+
+// Env var wins over the file, matching how the DB settings resolve. `require`
+// caches, so changing the PIN in dtr.config.js needs a server restart.
+function adminPin() {
+  if (process.env.ADMIN_PIN) return String(process.env.ADMIN_PIN);
+  try {
+    const fileCfg = require('./dtr.config');
+    return fileCfg && fileCfg.adminPin ? String(fileCfg.adminPin) : '';
+  } catch (err) {
+    if (err.code !== 'MODULE_NOT_FOUND') throw err;
+    return '';
+  }
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/form-image - serve the blank scanned form (for the calibrator)

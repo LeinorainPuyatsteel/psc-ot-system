@@ -24,17 +24,17 @@ const REPOS = [
 // credentials are NOT here — they live in the gitignored `dtr.config.js`.
 //
 // Overtime is only ever claimed in whole hours, so the clock-out is floored
-// to the hour: out at 8:34 PM files as 6:00 PM - 8:00 PM (2 hrs), and out at
-// 6:08 PM files nothing at all.
+// to the hour: on a day whose regular hours end at 6:00 PM, out at 8:34 PM
+// files as 6:00 PM - 8:00 PM (2 hrs), and out at 6:08 PM files nothing at all.
+//
+// WHEN a day's regular hours end depends on the schedule being worked — see
+// SCHEDULES below. The rules here are the parts that don't vary by schedule.
 // ---------------------------------------------------------------------------
 
 const OT_RULES = {
-  // Mon-Fri regular hours end here; overtime is counted from this hour on.
-  regularEndHour: 18, // 6:00 PM
-
-  // Saturday/Sunday: the whole attendance is overtime, but the unpaid lunch
-  // break is deducted when the span covers it. Time-in is rounded UP to the
-  // hour on these days (in at 10:59 AM starts the claim at 11:00 AM).
+  // On rest days the whole attendance is overtime, but the unpaid lunch break
+  // is deducted when the span covers it. Time-in is rounded UP to the hour on
+  // those days (in at 10:59 AM starts the claim at 11:00 AM).
   lunchStartHour: 12, // 12:00 NN
   lunchEndHour: 13,   //  1:00 PM
 
@@ -45,6 +45,59 @@ const OT_RULES = {
   // to fill in by hand instead of being guessed at.
   crossoverCutoffMinutes: 4 * 60 // 4:00 AM
 };
+
+// ---------------------------------------------------------------------------
+// SCHEDULES
+// ---------------------------------------------------------------------------
+// Not everyone works the same week, and the same punches mean different
+// overtime depending on which one you're on. Pick yours from the "Schedule"
+// box on the Review & Print tab; DEFAULT_SCHEDULE below is what that box
+// starts on.
+//
+// `regularEndHourByDay` gives, for each day of the week (0 = Sunday ...
+// 6 = Saturday), the hour that day's REGULAR shift ends — overtime runs from
+// there to the floored clock-out. `null` marks a rest day: no regular hours at
+// all, so the whole attendance is overtime, the time-in is rounded UP to the
+// hour, and the 12nn-1pm lunch comes off when the span covers it.
+//
+// Every day is listed explicitly, including the rest days. That's a few lines
+// of repetition in exchange for never having to guess what an omitted day
+// means.
+// ---------------------------------------------------------------------------
+
+const SCHEDULES = {
+  'five-day': {
+    label: '5-day week — Mon-Thu to 6 PM, Fri to 5 PM, Sat/Sun all OT',
+    regularEndHourByDay: {
+      0: null, // Sunday    - rest day
+      1: 18,   // Monday    - 6:00 PM
+      2: 18,   // Tuesday   - 6:00 PM
+      3: 18,   // Wednesday - 6:00 PM
+      4: 18,   // Thursday  - 6:00 PM
+      5: 17,   // Friday    - 5:00 PM
+      6: null  // Saturday  - rest day
+    }
+  },
+
+  'five-half-day': {
+    label: '5½-day week — Mon-Fri to 5 PM, Sat to 12 NN (OT from 1 PM), Sun all OT',
+    regularEndHourByDay: {
+      0: null, // Sunday    - rest day
+      1: 17,   // Monday    - 5:00 PM
+      2: 17,   // Tuesday   - 5:00 PM
+      3: 17,   // Wednesday - 5:00 PM
+      4: 17,   // Thursday  - 5:00 PM
+      5: 17,   // Friday    - 5:00 PM
+      // Saturday is a half day: regular hours run to 12 NN, then the unpaid
+      // 12nn-1pm lunch. Overtime therefore starts at 1:00 PM — the lunch falls
+      // outside the claim on its own, with nothing to deduct.
+      6: 13    // Saturday  - 1:00 PM
+    }
+  }
+};
+
+// Which schedule the UI's Schedule box starts on. Must be a key of SCHEDULES.
+const DEFAULT_SCHEDULE = 'five-day';
 
 // Signatory names printed on the form. Requested by / Recommending approval /
 // Approved by. These are defaults — they can be overridden per-form in the UI.
@@ -136,6 +189,8 @@ const FIELD_POSITIONS = {
 module.exports = {
   REPOS,
   OT_RULES,
+  SCHEDULES,
+  DEFAULT_SCHEDULE,
   REQUESTOR_NAME,
   RECOMMENDING_NAME,
   APPROVED_BY_NAME,

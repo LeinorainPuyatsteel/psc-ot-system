@@ -31,6 +31,15 @@ async function getCommitsForRepo(repo, since, until) {
   const args = [
     '-C', repo.path,
     'log',
+    // Every branch, not just whichever one happens to be checked out — a day's
+    // work shouldn't vanish from the form because you switched branches before
+    // generating it. `--branches --remotes` rather than `--all` on purpose:
+    // `--all` also walks refs/stash, which would file your WIP stashes as
+    // overtime reasons. Tags are skipped too; they point at commits the
+    // branches already reach. Git dedupes the walk, so a commit reachable from
+    // several refs (local + its origin/* twin, say) is still returned once.
+    '--branches',
+    '--remotes',
     `--since=${since.toISOString()}`,
     `--until=${until.toISOString()}`,
     '--date=iso-strict',
